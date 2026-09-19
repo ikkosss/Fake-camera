@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""Insert the FakeCamera hook at the head of Via's onShowFileChooser implementation.
+"""Wire the FakeCamera hooks into Via's obfuscated smali.
 
-The browser fragment (obfuscated to Lc8/s6;) receives every file-upload request in
-X(ValueCallback, FileChooserParams). The hook runs first: when it opens the gallery it returns
-true and X returns immediately, otherwise the untouched original code runs.
+Three call sites are patched:
 
-Usage: inject_hook.py <path-to-c8/s6.smali>
+* Lc8/s6;->X(ValueCallback, FileChooserParams)  -- WebChromeClient.onShowFileChooser, the file
+  upload path. The hook opens the gallery for capture requests and makes X return early.
+* Lp4/j;->onPageStarted(WebView, String, Bitmap) -- injects the getUserMedia shim as the new
+  document starts loading.
+* Lp4/c;->onProgressChanged(WebView, int) -- second chance to inject the shim, in case the
+  page-start injection landed too early. The script itself is idempotent.
+
+Usage: inject_hook.py <decoded-apk-root>
 """
+import os
 import sys
 
-METHOD = ".method public X(Landroid/webkit/ValueCallback;Landroid/webkit/WebChromeClient$FileChooserParams;)Z"
-ANCHOR = "    iput-object p1, p0, Lc8/s6;->F0:Landroid/webkit/ValueCallback;"
 MARKER = "Lmark/via/fakecam/FakeCamera;"
 
-HOOK = """
+FILE_CHOOSER_HOOK = """
     invoke-static {p0, p2}, Lmark/via/fakecam/FakeCamera;->interceptCapture(Landroidx/fragment/app/Fragment;Landroid/webkit/WebChromeClient$FileChooserParams;)Z
 
     move-result v0
@@ -27,34 +31,64 @@ HOOK = """
     :fakecam_default
 """
 
+PAGE_STARTED_HOOK = """
+    invoke-static {p1}, Lmark/via/fakecam/FakeCamera;->injectCameraShim(Landroid/webkit/WebView;)V
+"""
 
-def patch(text):
-    if MARKER in text:
-        raise SystemExit("hook already present")
+PROGRESS_HOOK = """
+    invoke-static {p1, p2}, Lmark/via/fakecam/FakeCamera;->injectCameraShim(Landroid/webkit/WebView;I)V
+"""
 
-    start = text.find(METHOD)
+
+def insert_after_anchor(text, method, anchor, hook):
+    """Insert hook right after the first occurrence of anchor inside method."""
+    start = text.find(method)
     if start < 0:
-        raise SystemExit(f"method not found: {METHOD}")
+        raise SystemExit(f"method not found: {method}")
 
-    anchor = text.find(ANCHOR, start)
-    if anchor < 0:
-        raise SystemExit(f"anchor not found inside method: {ANCHOR}")
+    end = text.find(".end method", start)
+    position = text.find(anchor, start)
+    if position < 0 or position > end:
+        raise SystemExit(f"anchor not found inside {method}: {anchor.strip()}")
 
-    end_of_method = text.find(".end method", start)
-    if not start < anchor < end_of_method:
-        raise SystemExit("anchor lies outside the target method")
+    cut = position + len(anchor)
+    return text[:cut] + hook + text[cut:]
 
-    cut = anchor + len(ANCHOR)
-    return text[:cut] + HOOK + text[cut:]
+
+def patch_file(root, relative_path, apply_hook):
+    path = os.path.join(root, relative_path)
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    if MARKER in text:
+        raise SystemExit(f"hook already present in {relative_path}")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(apply_hook(text))
+    print(f"patched {relative_path}")
 
 
 def main():
-    path = sys.argv[1]
-    with open(path, encoding="utf-8") as fh:
-        text = fh.read()
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(patch(text))
-    print(f"patched {path}")
+    root = sys.argv[1]
+
+    patch_file(root, "smali/c8/s6.smali", lambda text: insert_after_anchor(
+        text,
+        ".method public X(Landroid/webkit/ValueCallback;Landroid/webkit/WebChromeClient$FileChooserParams;)Z",
+        "    iput-object p1, p0, Lc8/s6;->F0:Landroid/webkit/ValueCallback;",
+        FILE_CHOOSER_HOOK,
+    ))
+
+    patch_file(root, "smali/p4/j.smali", lambda text: insert_after_anchor(
+        text,
+        ".method public onPageStarted(Landroid/webkit/WebView;Ljava/lang/String;Landroid/graphics/Bitmap;)V",
+        "    .locals 1",
+        PAGE_STARTED_HOOK,
+    ))
+
+    patch_file(root, "smali/p4/c.smali", lambda text: insert_after_anchor(
+        text,
+        ".method public onProgressChanged(Landroid/webkit/WebView;I)V",
+        "    .locals 1",
+        PROGRESS_HOOK,
+    ))
 
 
 if __name__ == "__main__":

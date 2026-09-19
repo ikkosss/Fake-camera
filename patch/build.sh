@@ -112,14 +112,17 @@ python3 "$PATCH_DIR/tools/json2yml.py" \
     "$APKTOOL_VERSION"
 
 log "Compiling FakeCamera"
-mkdir -p "$BUILD_DIR/stub-classes" "$BUILD_DIR/classes" "$BUILD_DIR/dex"
+mkdir -p "$BUILD_DIR/stub-classes" "$BUILD_DIR/classes" "$BUILD_DIR/dex" "$BUILD_DIR/generated"
+python3 "$PATCH_DIR/tools/embed_js.py" \
+    "$PATCH_DIR/src/mark/via/fakecam/camera_shim.js" \
+    "$BUILD_DIR/generated"
 javac -nowarn -source 8 -target 8 -bootclasspath "$ANDROID_JAR" \
     -d "$BUILD_DIR/stub-classes" \
     $(find "$PATCH_DIR/stubs" -name '*.java') 2>/dev/null
 javac -nowarn -source 8 -target 8 -bootclasspath "$ANDROID_JAR" \
     -classpath "$BUILD_DIR/stub-classes" \
     -d "$BUILD_DIR/classes" \
-    $(find "$PATCH_DIR/src" -name '*.java') 2>/dev/null
+    $(find "$PATCH_DIR/src" "$BUILD_DIR/generated" -name '*.java') 2>/dev/null
 
 log "Converting to dex and back to smali"
 "$D8" --min-api 19 --no-desugaring --output "$BUILD_DIR/dex" \
@@ -128,8 +131,8 @@ java -cp "$(printf '%s:' "$BAKSMALI_DIR"/*.jar)" com.android.tools.smali.baksmal
     "$BUILD_DIR/dex/classes.dex" -o "$BUILD_DIR/smali-out" >/dev/null
 cp -r "$BUILD_DIR/smali-out/mark" "$BUILD_DIR/src/smali/"
 
-log "Injecting the hook into the browser fragment"
-python3 "$PATCH_DIR/tools/inject_hook.py" "$BUILD_DIR/src/smali/c8/s6.smali"
+log "Injecting the hooks into Via"
+python3 "$PATCH_DIR/tools/inject_hook.py" "$BUILD_DIR/src"
 
 log "Building APK"
 java -jar "$APKTOOL_JAR" build "$BUILD_DIR/src" -o "$BUILD_DIR/unsigned.apk"

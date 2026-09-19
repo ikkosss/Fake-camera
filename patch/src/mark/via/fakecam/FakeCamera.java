@@ -6,22 +6,44 @@ import android.net.Uri;
 import android.os.Build;
 import android.provider.MediaStore;
 import android.webkit.WebChromeClient;
+import android.webkit.WebView;
 
 import androidx.fragment.app.Fragment;
 
 /**
- * Redirects web camera capture requests to the device gallery.
+ * Redirects web camera requests to the device gallery.
  *
- * <p>When a page uses {@code <input type="file" capture>} the browser is expected to launch a
- * camera app. This hook answers such requests with a gallery picker instead, so the picture the
- * user selects reaches the page as if it had just been taken.
+ * <p>Pages reach the camera two ways, and both end up here. A {@code <input type="file" capture>}
+ * upload arrives at {@link #interceptCapture} and is answered with a gallery picker. A
+ * {@code getUserMedia()} call is handled in the page itself by the script {@link #injectCameraShim}
+ * installs, which turns the picture the user selects into the camera stream.
  */
 public final class FakeCamera {
 
     /** Request code Via already uses for its own file chooser, so its result handler picks it up. */
     private static final int FILE_CHOOSER_REQUEST_CODE = 0x6f;
 
+    /** Above this loading progress a page has likely run its own scripts already. */
+    private static final int LATEST_USEFUL_PROGRESS = 40;
+
     private FakeCamera() {
+    }
+
+    /** Installs the getUserMedia shim; harmless to call more than once per document. */
+    public static void injectCameraShim(WebView webView) {
+        if (webView == null) {
+            return;
+        }
+        try {
+            webView.evaluateJavascript(CameraShim.SOURCE, null);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public static void injectCameraShim(WebView webView, int progress) {
+        if (progress <= LATEST_USEFUL_PROGRESS) {
+            injectCameraShim(webView);
+        }
     }
 
     /**
